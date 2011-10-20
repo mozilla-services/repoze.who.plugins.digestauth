@@ -10,12 +10,12 @@ from repoze.who.interfaces import IAuthenticator
 from repoze.who.interfaces import IChallenger
 
 from repoze.who.plugins.digestauth import DigestAuthPlugin, make_plugin
-from repoze.who.plugins.digestauth import SignedNonceManager
-from repoze.who.plugins.digestauth import (parse_auth_header,
-                                           calculate_digest_response,
-                                           calculate_pwdhash,
-                                           validate_digest_parameters,
-                                           validate_digest_uri)
+from repoze.who.plugins.digestauth.noncemanager import SignedNonceManager
+from repoze.who.plugins.digestauth.utils import (parse_auth_header,
+                                                 calculate_digest_response,
+                                                 calculate_pwdhash,
+                                                 validate_digest_parameters,
+                                                 validate_digest_uri)
 
 
 def make_environ(**kwds):
