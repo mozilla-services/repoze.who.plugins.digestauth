@@ -56,7 +56,7 @@ from repoze.who.plugins.digestauth.utils import (parse_auth_header,
 
 
 # WSGI environ key used to indicate a stale nonce.
-_ENVKEY_STALE_NONCE = "cornice.auth.whoauth.digestauth.stale_nonce"
+_ENVKEY_STALE_NONCE = "repoze.who.plugins.digestauth.stale_nonce"
 
 
 class DigestAuthPlugin(object):
