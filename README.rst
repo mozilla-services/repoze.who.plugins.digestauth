@@ -42,6 +42,20 @@ The following configuration options are available:
     * nonce_manager:  dotted name of a class to use for nonce management
 
 
+Authentication
+==============
+
+To authenticate a user via Digest Auth, this plugin needs access to either
+their raw password or their "password hash", which is the MD5 digest of their
+username, password and authentication realm::
+
+    def calculate_pwdhash(username, password, realm):
+        return md5("%s:%s:%s" % (username, realm, password)).hexdigest()
+
+You must provide the callback function "get_password" or "get_pwdhash" to
+the DigestAuthPlugin.
+
+
 Nonce Management
 ================
 
