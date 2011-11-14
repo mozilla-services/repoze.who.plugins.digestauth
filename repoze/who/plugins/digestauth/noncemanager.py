@@ -169,20 +169,23 @@ class SignedNonceManager(object):
     def generate_nonce(self, environ):
         """Generate a new nonce value.
 
-        In this implementation the nonce consists of an encoded timestamp
-        and a HMAC signature to prevent forgery.  The signature can embed
-        additional headers from the client request, to tie it to a particular
-        user-agent.
+        In this implementation the nonce consists of an encoded timestamp,
+        some random bytes, and a HMAC signature to prevent forgery.  The
+        The signature can embed additional headers from the client request,
+        to tie it to a particular user-agent.
         """
-        # The nonce is the current time, hmac-signed along with the
-        # request headers to tie it to a particular client or user-agent.
+        # Grab the current time to a sensible precision.
         timestamp = hex(int(time.time() * 10))
         # Remove hex-formatting guff e.g. "0x31220ead8L" => "31220ead8"
         timestamp = timestamp[2:]
         if timestamp.endswith("L"):
             timestamp = timestamp[:-1]
-        sig = self._get_signature(timestamp, environ)
-        return "%s:%s" % (timestamp, sig)
+        # Add some random bytes to avoid repeating nonces when several are
+        # generated very close together.
+        data = "%s:%s" % (timestamp, os.urandom(3).encode("hex"))
+        # Append the signature.
+        sig = self._get_signature(data, environ)
+        return "%s:%s" % (data, sig)
 
     def is_valid_nonce(self, nonce, environ):
         """Check whether the given nonce is valid.
@@ -193,8 +196,8 @@ class SignedNonceManager(object):
         """
         if self._nonce_has_expired(nonce):
             return False
-        timestamp, sig = nonce.split(":", 1)
-        expected_sig = self._get_signature(timestamp, environ)
+        data, sig = nonce.rsplit(":", 1)
+        expected_sig = self._get_signature(data, environ)
         # This is a deliberately slow string-compare to avoid timing attacks.
         # Read the docstring of strings_differ for more details.
         return not strings_differ(sig, expected_sig)
@@ -255,7 +258,7 @@ class SignedNonceManager(object):
         if timeout is None:
             timeout = self.timeout
         try:
-            timestamp, sig = nonce.split(":", 1)
+            timestamp = nonce.split(":", 1)[0]
             expiry_time = (int(timestamp, 16) * 0.1) + timeout
         except ValueError:
             # Eh? Malformed Nonce? Treat it as expired.
