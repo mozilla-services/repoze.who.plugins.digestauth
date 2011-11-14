@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 here = os.path.abspath(os.path.dirname(__file__))
 
-with open(os.path.join(here, 'README.txt')) as f:
+with open(os.path.join(here, 'README.rst')) as f:
     README = f.read()
 
 with open(os.path.join(here, 'CHANGES.txt')) as f:
@@ -22,7 +22,7 @@ setup(name='repoze.who.plugins.digestauth',
       author='',
       author_email='',
       url='',
-      keywords='authentication repoze digest',
+      keywords='authentication repoze http digest',
       packages=find_packages(),
       include_package_data=True,
       zip_safe=False,
