@@ -7,7 +7,8 @@ as per RFC-2617:
 
     http://tools.ietf.org/html/rfc2617
 
-It provides complete support for the protocol as it is used in the wild:
+It provides good support for the protocol as it is typically used in the
+wild:
 
     * both qop="auth" and qop="auth-int" modes
     * compatability mode for legacy clients
