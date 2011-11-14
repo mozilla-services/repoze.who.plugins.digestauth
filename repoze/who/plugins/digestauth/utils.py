@@ -11,14 +11,14 @@
 # for the specific language governing rights and limitations under the
 # License.
 #
-# The Original Code is Cornice (Sagrada)
+# The Original Code is repoze.who.plugins.digestauth
 #
 # The Initial Developer of the Original Code is the Mozilla Foundation.
 # Portions created by the Initial Developer are Copyright (C) 2011
 # the Initial Developer. All Rights Reserved.
 #
 # Contributor(s):
-#   Ryan Kelly (ryan@rfk.id.au)
+#   Ryan Kelly (rkelly@mozilla.com)
 #
 # Alternatively, the contents of this file may be used under the terms of
 # either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -67,7 +67,7 @@ def parse_auth_header(value):
     This function can be used to parse the value from an Authorization
     header into a dict of its constituent parameters.  The auth scheme
     name will be included under the key "scheme", and any other auth
-    params will appear as keys in the dictionary.
+    creds will appear as keys in the dictionary.
 
     For example, given the following auth header value:
 
@@ -95,7 +95,7 @@ def parse_auth_header(value):
         if not _AUTH_PARAM_RE.match(kvpairs[-1]):
             raise ValueError('Malformed auth parameters')
     # Now we can just split by the equal-sign to get each key and value.
-    params = {"scheme": scheme}
+    creds = {"scheme": scheme}
     for kvpair in kvpairs:
         (key, value) = kvpair.strip().split("=", 1)
         # For quoted strings, remove quotes and backslash-escapes.
@@ -104,51 +104,90 @@ def parse_auth_header(value):
             if _UNESC_QUOTE_RE.search(value):
                 raise ValueError("Unescaped quote in quoted-string")
             value = _ESCAPED_CHAR.sub(lambda m: m.group(0)[1], value)
-        params[key] = value
-    return params
+        creds[key] = value
+    return creds
 
 
-def validate_digest_parameters(params, realm=None):
-    """Validate the given dict of digest-auth parameters.
+def extract_digest_credentials(environ):
+    """Extract digest credentials from the given request environment.
 
-    This function allows you to sanity-check digest-auth parameters, to
-    make sure that all required information has been provided.  It returns
-    True if the parameters are a well-formed digest-auth response, False
-    otherwise.
+    This function extracts the HTTP-Digest-Auth credentials from the given
+    request environment, performs some sanity checks, and returns them as
+    a dict.  If the credentials are missing or invalid, None is returned.
     """
-    # Check for required information.
+    # Grab the auth credentials, if any.
+    authz = environ.get("HTTP_AUTHORIZATION")
+    if authz is None:
+        return None
+    # Parse out the dict of credentials credentials.
+    try:
+        creds = parse_auth_header(authz)
+    except ValueError:
+        return None
+    if creds["scheme"].lower() != "digest":
+        return None
+    # Check that there's nothing broken or missing.
+    if not validate_digest_parameters(creds):
+        return None
+    # Check that the reported uri matches the request URI
+    if not validate_digest_uri(creds, environ):
+        return None
+    # Include extra information from the request itself.
+    creds["request-method"] = environ["REQUEST_METHOD"]
+    if creds.get("qop") == "auth-int":
+        creds["content-md5"] = environ["HTTP_CONTENT_MD5"]
+    return creds
+
+
+def validate_digest_parameters(creds):
+    """Validate that credentials contain valid digest-auth parameters.
+
+    This function provides a basic sanity-check on the given digest-auth
+    credentials.  It checks that they're well-formed and are not missing
+    any parameters, but doesn't actually provide any authentication.
+
+    Returns True if the parameters are valid, False if not.
+    """
+    # Check that we have all the basic information.
     for key in ("username", "realm", "nonce", "uri", "response"):
-        if key not in params:
+        if key not in creds:
             return False
-    if realm is not None and params["realm"] != realm:
-        return False
     # Check for extra information required when "qop" is present.
-    if "qop" in params:
+    if "qop" in creds:
         for key in ("cnonce", "nc"):
-            if key not in params:
+            if key not in creds:
                 return False
-        if params["qop"] not in ("auth", "auth-int"):
+        if creds["qop"] not in ("auth", "auth-int"):
+            return False
+        # RFC-2617 says the nonce-count must be an 8-char-long hex number.
+        # We enforce the length limit strictly since flooding the server with
+        # many large nonce-counts could cause a DOS via memory exhaustion.
+        if len(creds["nc"]) > 8:
+            return False
+        try:
+            int(creds["nc"], 16)
+        except ValueError:
             return False
     # Check that the algorithm, if present, is explcitly set to MD5.
-    if "algorithm" in params and params["algorithm"].lower() != "md5":
+    if "algorithm" in creds and creds["algorithm"].lower() != "md5":
         return False
     # Looks good!
     return True
 
 
-def validate_digest_uri(environ, params, msie_hack=True):
+def validate_digest_uri(creds, environ, msie_hack=True):
     """Validate that the digest URI matches the request environment.
 
     This is a helper function to check that digest-auth is being applied
     to the correct URI.  It matches the given request environment against
-    the URI specified in the digest auth parameters, returning True if
+    the URI specified in the digest auth credentials, returning True if
     they are equiavlent and False otherwise.
 
     Older versions of MSIE are known to handle certain URIs incorrectly,
     and this function includes a hack to work around this problem.  To
     disable it and sligtly increase security, pass msie_hack=False.
     """
-    uri = params["uri"]
+    uri = creds["uri"]
     req_uri = wsgiref.util.request_uri(environ)
     if uri != req_uri:
         p_req_uri = urlparse(req_uri)
@@ -168,42 +207,6 @@ def validate_digest_uri(environ, params, msie_hack=True):
     return True
 
 
-def validate_digest_nonce(environ, params, nonce_manager):
-    """Validate that the digest parameters contain a fresh nonce.
-
-    This is a helper function to check that the provided digest-auth
-    credentials contain a valid, up-to-date nonce.  It calls various
-    methods on the provided NonceManager object in order to query and
-    update the state of the nonce database.
-
-    Returns True if the nonce is valid, False otherwise.
-    """
-    # Check that the nonce itself is valid.
-    nonce = params["nonce"]
-    if not nonce_manager.is_valid_nonce(nonce, environ):
-        return False
-    # Check that the nonce-count is valid.
-    # RFC-2617 says the nonce-count must be an 8-char-long hex number.
-    # We convert to an integer since they take less memory than strings.
-    # We enforce the length limit strictly since flooding the server with
-    # many large nonce-counts could cause a DOS via memory exhaustion.
-    nc_new = params.get("nc", None)
-    if nc_new is not None:
-        try:
-            nc_new = int(nc_new[:8], 16)
-        except ValueError:
-            return False
-    # Check that the the nonce-count is strictly increasing.
-    nc_old = nonce_manager.get_nonce_count(nonce)
-    if nc_old is not None:
-        if nc_new is None or nc_new <= nc_old:
-            return False
-    if nc_new is not None:
-        nonce_manager.set_nonce_count(nonce, nc_new)
-    # Looks good!
-    return True
-
-
 def calculate_pwdhash(username, password, realm):
     """Calculate the password hash used for digest auth.
 
@@ -215,16 +218,16 @@ def calculate_pwdhash(username, password, realm):
     return md5(data).hexdigest()
 
 
-def calculate_reqhash(environ, params):
+def calculate_reqhash(creds):
     """Calculate the request hash used for digest auth.
 
-    This function takes the request environment and digest parameters,
-    and calculates the request hash (aka "HA2") used in the digest-auth
-    protocol.  It assumes that the hash algorithm is MD5.
+    This function takes the digest auth credentials and calculates the
+    request hash (aka "HA2") used in the digest-auth protocol.  It assumes
+    that the hash algorithm is MD5.
     """
-    method = environ["REQUEST_METHOD"]
-    uri = params["uri"]
-    qop = params.get("qop")
+    method = creds["request-method"]
+    uri = creds["uri"]
+    qop = creds.get("qop")
     # For qop="auth" or unspecified, we just has the method and uri.
     if qop in (None, "auth"):
         data = "%s:%s" % (method, uri)
@@ -232,7 +235,7 @@ def calculate_reqhash(environ, params):
     # We assume that a Content-MD5 header has been sent and is being
     # checked by some other layer in the stack.
     elif qop == "auth-int":
-        content_md5 = environ["HTTP_CONTENT_MD5"]
+        content_md5 = creds["content-md5"]
         content_md5 = base64.b64decode(content_md5)
         data = "%s:%s:%s" % (method, uri, content_md5)
     # No other qop values are recognised.
@@ -241,42 +244,42 @@ def calculate_reqhash(environ, params):
     return md5(data).hexdigest()
 
 
-def calculate_digest_response(environ, params, pwdhash=None, password=None):
+def calculate_digest_response(creds, pwdhash=None, password=None):
     """Calculate the expected response to a digest challenge.
 
-    Given the digest challenge parameters, request environ, and password or
-    password hash, this function calculates the expected digest responds
+    Given the digest challenge credentials and the user's password or
+    password hash, this function calculates the expected digest response
     according to RFC-2617.  It assumes that the hash algorithm is MD5.
     """
-    username = params["username"]
-    realm = params["realm"]
+    username = creds["username"]
+    realm = creds["realm"]
     if pwdhash is None:
         if password is None:
             raise ValueError("must provide either 'pwdhash' or 'password'")
         pwdhash = calculate_pwdhash(username, password, realm)
-    reqhash = calculate_reqhash(environ, params)
-    qop = params.get("qop")
+    reqhash = calculate_reqhash(creds)
+    qop = creds.get("qop")
     if qop is None:
-        data = "%s:%s:%s" % (pwdhash, params["nonce"], reqhash)
+        data = "%s:%s:%s" % (pwdhash, creds["nonce"], reqhash)
     else:
-        data = ":".join([pwdhash, params["nonce"], params["nc"],
-                         params["cnonce"], qop, reqhash])
+        data = ":".join([pwdhash, creds["nonce"], creds["nc"],
+                         creds["cnonce"], qop, reqhash])
     return md5(data).hexdigest()
 
 
-def check_digest_response(environ, params, pwdhash=None, password=None):
+def check_digest_response(creds, pwdhash=None, password=None):
     """Check if the given digest response is valid.
 
-    This function checks whether a dict of digest response parameters
+    This function checks whether a dict of digest response credentials
     has been correctly authenticated using the specified password or
     password hash.
     """
-    expected = calculate_digest_response(environ, params, pwdhash)
+    expected = calculate_digest_response(creds, pwdhash)
     # Use a timing-invarient comparison to prevent guessing the correct
     # digest one character at a time.  Ideally we would reject repeated
     # attempts to use the same nonce, but that may not be possible using
     # e.g. time-based nonces.  This is a nice extra safeguard.
-    return not strings_differ(expected, params["response"])
+    return not strings_differ(expected, creds["response"])
 
 
 def strings_differ(string1, string2):

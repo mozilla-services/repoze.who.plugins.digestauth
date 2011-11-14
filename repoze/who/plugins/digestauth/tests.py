@@ -1,3 +1,39 @@
+# ***** BEGIN LICENSE BLOCK *****
+# Version: MPL 1.1/GPL 2.0/LGPL 2.1
+#
+# The contents of this file are subject to the Mozilla Public License Version
+# 1.1 (the "License"); you may not use this file except in compliance with
+# the License. You may obtain a copy of the License at
+# http://www.mozilla.org/MPL/
+#
+# Software distributed under the License is distributed on an "AS IS" basis,
+# WITHOUT WARRANTY OF ANY KIND, either express or implied. See the License
+# for the specific language governing rights and limitations under the
+# License.
+#
+# The Original Code is repoze.who.plugins.digestauth
+#
+# The Initial Developer of the Original Code is the Mozilla Foundation.
+# Portions created by the Initial Developer are Copyright (C) 2011
+# the Initial Developer. All Rights Reserved.
+#
+# Contributor(s):
+#   Ryan Kelly (rkelly@mozilla.com)
+#
+# Alternatively, the contents of this file may be used under the terms of
+# either the GNU General Public License Version 2 or later (the "GPL"), or
+# the GNU Lesser General Public License Version 2.1 or later (the "LGPL"),
+# in which case the provisions of the GPL or the LGPL are applicable instead
+# of those above. If you wish to allow use of your version of this file only
+# under the terms of either the GPL or the LGPL, and not to allow others to
+# use your version of this file under the terms of the MPL, indicate your
+# decision by deleting the provisions above and replace them with the notice
+# and other provisions required by the GPL or the LGPL. If you do not delete
+# the provisions above, a recipient may use your version of this file under
+# the terms of any one of the MPL, the GPL or the LGPL.
+#
+# ***** END LICENSE BLOCK *****
+
 import unittest
 
 import os
@@ -14,6 +50,7 @@ from repoze.who.plugins.digestauth.noncemanager import SignedNonceManager
 from repoze.who.plugins.digestauth.utils import (parse_auth_header,
                                                  calculate_digest_response,
                                                  calculate_pwdhash,
+                                                 extract_digest_credentials,
                                                  validate_digest_parameters,
                                                  validate_digest_uri)
 
@@ -56,12 +93,14 @@ def get_challenge(plugin, environ):
     for name, value in plugin.forget(environ, {}):
         if name == "WWW-Authenticate":
             return parse_auth_header(value)
-    raise ValueError("plugin didn't issue a challenge")
+    raise ValueError("plugin didn't issue a challenge")  # pragma: nocover
 
 
 def build_response(environ, params, username, password, **kwds):
     """Build a response to the digest-auth challenge."""
     params = params.copy()
+    params["request-method"] = environ["REQUEST_METHOD"]
+    params["content-md5"] = environ.get("HTTP_CONTENT_MD5")
     # remove qop from the challenge parameters.
     params.pop("qop", None)
     params.update(kwds)
@@ -74,7 +113,7 @@ def build_response(environ, params, username, password, **kwds):
     else:
         params.setdefault("cnonce", os.urandom(8).encode("hex"))
         params.setdefault("nc", "0000001")
-    resp = calculate_digest_response(environ, params, password=password)
+    resp = calculate_digest_response(params, password=password)
     params["response"] = resp
     authz = ",".join('%s="%s"' % v for v in params.iteritems())
     environ["HTTP_AUTHORIZATION"] = "Digest " + authz
@@ -96,7 +135,7 @@ class EasyNonceManager(object):
     def get_nonce_count(self, nonce):
         return None
 
-    def set_nonce_count(self, nonce, nc):
+    def record_nonce_count(self, nonce, nc):
         return None
 
 
@@ -120,7 +159,10 @@ class TestDigestAuthPlugin(unittest.TestCase):
         self.assertEquals(plugin.domain, "http://example.com")
         self.failUnless(isinstance(plugin.nonce_manager, EasyNonceManager))
         self.failUnless(plugin.get_pwdhash is get_pwdhash)
+        self.assertEquals(plugin.get_pwdhash("test", "test"),
+                          calculate_pwdhash("test", "test", "test"))
         self.failUnless(plugin.get_password is get_password)
+        self.assertEquals(plugin.get_password("test"), "test")
 
     # Tests for various cases in the identify() method.
 
@@ -144,6 +186,14 @@ class TestDigestAuthPlugin(unittest.TestCase):
         environ = make_environ(HTTP_AUTHORIZATION="Digest realm=Sync")
         self.assertEquals(plugin.identify(environ), None)
 
+    def test_identify_with_mismatched_realm(self):
+        plugin = DigestAuthPlugin("test")
+        environ = make_environ()
+        params = get_challenge(plugin, environ)
+        params["realm"] = "SomeOtherRealm"
+        build_response(environ, params, "tester", "testing")
+        self.assertEquals(plugin.identify(environ), None)
+
     def test_identify_with_mismatched_uri(self):
         plugin = DigestAuthPlugin("test")
         environ = make_environ(PATH_INFO="/path_one")
@@ -159,7 +209,9 @@ class TestDigestAuthPlugin(unittest.TestCase):
         # Do an initial auth to get the nonce.
         params = get_challenge(plugin, environ)
         build_response(environ, params, "tester", "testing", nc="01")
-        self.assertNotEquals(plugin.identify(environ), None)
+        identity = plugin.identify(environ)
+        self.assertNotEquals(identity, None)
+        plugin.remember(environ, identity)
         # Authing without increasing nc will fail.
         environ = make_environ(REQUEST_METHOD="GET", PATH_INFO="/two")
         build_response(environ, params, "tester", "testing", nc="01")
@@ -180,10 +232,9 @@ class TestDigestAuthPlugin(unittest.TestCase):
     # Tests for various cases in the authenticate() method.
 
     def test_rfc2617_example(self):
-        plugin = DigestAuthPlugin("test", nonce_manager=EasyNonceManager())
+        plugin = DigestAuthPlugin("testrealm@host.com",
+                                  nonce_manager=EasyNonceManager())
         # Calculate the response according to the RFC example parameters.
-        environ = make_environ(REQUEST_METHOD="GET",
-                               PATH_INFO="/dir/index.html")
         password = "Circle Of Life"
         params = {"username": "Mufasa",
                   "realm": "testrealm@host.com",
@@ -192,14 +243,18 @@ class TestDigestAuthPlugin(unittest.TestCase):
                   "qop": "auth",
                   "nc": "00000001",
                   "cnonce": "0a4f113b",
-                  "opaque": "5ccc069c403ebaf9f0171e9517f40e41"}
-        resp = calculate_digest_response(environ, params, password=password)
+                  "opaque": "5ccc069c403ebaf9f0171e9517f40e41",
+                  "request-method": "GET",
+                  }
+        resp = calculate_digest_response(params, password=password)
         # Check that it's as expected
         self.assertEquals(resp, "6629fae49393a05397450978507c4ef1")
         # Check that we can auth using it.
         params["response"] = resp
         authz = ",".join('%s="%s"' % v for v in params.iteritems())
-        environ["HTTP_AUTHORIZATION"] = "Digest " + authz
+        environ = make_environ(REQUEST_METHOD="GET",
+                               PATH_INFO="/dir/index.html",
+                               HTTP_AUTHORIZATION="Digest "+authz)
         identity = plugin.identify(environ)
         self.assertEquals(identity["username"], "Mufasa")
 
@@ -268,8 +323,10 @@ class TestDigestAuthPlugin(unittest.TestCase):
         environ = make_environ()
         params = get_challenge(plugin, environ)
         params = build_response(environ, params, "tester", "testing")
+        authz = environ["HTTP_AUTHORIZATION"].replace("auth", "super-duper")
+        environ["HTTP_AUTHORIZATION"] = authz
+        self.assertEquals(plugin.identify(environ), None)
         params["qop"] = "super-duper"
-        self.assertEquals(plugin.identify(params), None)
         self.assertRaises(ValueError, plugin.authenticate, environ, params)
 
     def test_auth_with_failed_password_lookup(self):
@@ -277,7 +334,7 @@ class TestDigestAuthPlugin(unittest.TestCase):
         environ = make_environ()
         params = get_challenge(plugin, environ)
         params = build_response(environ, params, "tester", "testing")
-        self.assertEquals(plugin.identify(params), None)
+        self.assertNotEquals(plugin.identify(environ), None)
         self.assertRaises(ValueError, plugin.authenticate, environ, params)
 
     def test_auth_with_missing_nonce(self):
@@ -286,7 +343,7 @@ class TestDigestAuthPlugin(unittest.TestCase):
         params = get_challenge(plugin, environ)
         params = build_response(environ, params, "tester", "testing")
         del params["nonce"]
-        self.assertEquals(plugin.identify(params), None)
+        self.assertNotEquals(plugin.identify(environ), None)
         self.assertRaises(KeyError, plugin.authenticate, environ, params)
 
     def test_auth_with_invalid_content_md5(self):
@@ -296,7 +353,8 @@ class TestDigestAuthPlugin(unittest.TestCase):
         params = get_challenge(plugin, environ)
         params = build_response(environ, params, "tester", "testing",
                                 qop="auth-int")
-        environ["HTTP_CONTENT_MD5"] = "8baNZjN6gc+g0gdhccuiqA=="
+        params["content-md5"] = "8baNZjN6gc+g0gdhccuiqA=="
+        self.assertNotEquals(plugin.identify(environ), None)
         self.assertEquals(plugin.authenticate(environ, params), None)
 
     # Tests for various cases in the remember() method.
@@ -423,7 +481,7 @@ class TestSignedNonceManager(unittest.TestCase):
         environ = make_environ()
         nonce1 = nm.generate_nonce(environ)
         self.assertEquals(nm.get_nonce_count(nonce1), None)
-        nm.set_nonce_count(nonce1, 1)
+        nm.record_nonce_count(nonce1, 1)
         self.assertEquals(nm.get_nonce_count(nonce1), 1)
         # purging won't remove it until it has expired.
         nm._purge_expired_nonces()
@@ -436,17 +494,17 @@ class TestSignedNonceManager(unittest.TestCase):
         nm = SignedNonceManager(timeout=0.2)
         environ = make_environ()
         nonce1 = nm.generate_nonce(environ)
-        nm.set_nonce_count(nonce1, 1)
+        nm.record_nonce_count(nonce1, 1)
         time.sleep(0.1)
         # nonce1 hasn't expired, so adding a new one won't purge it
         nonce2 = nm.generate_nonce(environ)
-        nm.set_nonce_count(nonce2, 1)
+        nm.record_nonce_count(nonce2, 1)
         self.assertEquals(nm.get_nonce_count(nonce1), 1)
         time.sleep(0.1)
         # nonce1 has expired, it should be purged when adding another.
         # nonce2 hasn't expired so it should remain in memory.
         nonce3 = nm.generate_nonce(environ)
-        nm.set_nonce_count(nonce3, 1)
+        nm.record_nonce_count(nonce3, 1)
         self.assertEquals(nm.get_nonce_count(nonce1), None)
         self.assertEquals(nm.get_nonce_count(nonce2), 1)
 
@@ -500,11 +558,13 @@ class TestDigestAuthHelpers(unittest.TestCase):
                       uri="/my/page", cnonce="98765")
         # Missing "nc"
         self.failIf(validate_digest_parameters(params))
-        params["nc"] = "0001"
+        # Malformed "nc"
+        params["nc"] = "0000000001"
+        self.failIf(validate_digest_parameters(params))
+        params["nc"] = "XYZ"
+        self.failIf(validate_digest_parameters(params))
+        params["nc"] = "001"
         self.failUnless(validate_digest_parameters(params))
-        # Wrong realm
-        self.failIf(validate_digest_parameters(params, realm="otherrealm"))
-        self.failUnless(validate_digest_parameters(params, realm="testrealm"))
         # Unknown qop
         params["qop"] = "super-duper"
         self.failIf(validate_digest_parameters(params))
@@ -524,32 +584,29 @@ class TestDigestAuthHelpers(unittest.TestCase):
         self.failIf(validate_digest_parameters(params))
         params["uri"] = "/my/page"
         self.failUnless(validate_digest_parameters(params))
-        # Wrong realm
-        self.failIf(validate_digest_parameters(params, realm="otherrealm"))
-        self.failUnless(validate_digest_parameters(params, realm="testrealm"))
 
     def test_validate_digest_uri(self):
         environ = make_environ(SCRIPT_NAME="/my", PATH_INFO="/page")
         params = dict(scheme="Digest", realm="testrealm", username="tester",
                       nonce="abcdef", response="123456", qop="auth",
                       uri="/my/page", cnonce="98765", nc="0001")
-        self.failUnless(validate_digest_uri(environ, params))
+        self.failUnless(validate_digest_uri(params, environ))
         # Using full URI still works
         params["uri"] = "http://localhost/my/page"
-        self.failUnless(validate_digest_uri(environ, params))
+        self.failUnless(validate_digest_uri(params, environ))
         # Check that query-string is taken into account.
         params["uri"] = "http://localhost/my/page?test=one"
-        self.failIf(validate_digest_uri(environ, params))
+        self.failIf(validate_digest_uri(params, environ))
         environ["QUERY_STRING"] = "test=one"
-        self.failUnless(validate_digest_uri(environ, params))
+        self.failUnless(validate_digest_uri(params, environ))
         params["uri"] = "/my/page?test=one"
-        self.failUnless(validate_digest_uri(environ, params))
+        self.failUnless(validate_digest_uri(params, environ))
         # Check that only MSIE is allow to fudge on the query-string.
         params["uri"] = "/my/page"
         environ["HTTP_USER_AGENT"] = "I AM FIREFOX I HAVE TO DO IT PROPERLY"
-        self.failIf(validate_digest_uri(environ, params))
+        self.failIf(validate_digest_uri(params, environ))
         environ["HTTP_USER_AGENT"] = "I AM ANCIENT MSIE PLZ HELP KTHXBYE"
-        self.failUnless(validate_digest_uri(environ, params))
-        self.failIf(validate_digest_uri(environ, params, msie_hack=False))
+        self.failUnless(validate_digest_uri(params, environ))
+        self.failIf(validate_digest_uri(params, environ, msie_hack=False))
         params["uri"] = "/wrong/page"
-        self.failIf(validate_digest_uri(environ, params))
+        self.failIf(validate_digest_uri(params, environ))

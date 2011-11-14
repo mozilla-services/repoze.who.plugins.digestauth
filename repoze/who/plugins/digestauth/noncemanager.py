@@ -11,14 +11,14 @@
 # for the specific language governing rights and limitations under the
 # License.
 #
-# The Original Code is Cornice (Sagrada)
+# The Original Code is repoze.who.plugins.digestauth
 #
 # The Initial Developer of the Original Code is the Mozilla Foundation.
 # Portions created by the Initial Developer are Copyright (C) 2011
 # the Initial Developer. All Rights Reserved.
 #
 # Contributor(s):
-#   Ryan Kelly (ryan@rfk.id.au)
+#   Ryan Kelly (rkelly@mozilla.com)
 #
 # Alternatively, the contents of this file may be used under the terms of
 # either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -56,11 +56,11 @@ class NonceManager(object):
     This class defines the necessary methods for managing nonces as
     part of the digest-auth protocol:
 
-        * generate_nonce:    create a new unique nonce
-        * is_valid_nonce:    check for validity of a nonce
-        * get_next_nonce:    get next nonce to be used by client
-        * set_nonce_count:   record nonce counter sent by client
-        * get_nonce_count:   retrieve nonce counter sent by client
+        * generate_nonce:       create a new unique nonce
+        * is_valid_nonce:       check for validity of a nonce
+        * get_next_nonce:       get next nonce to be used by client
+        * record_nonce_count:   record nonce counter sent by client
+        * get_nonce_count:      retrieve nonce counter sent by client
 
     Nonce management is split out into a separate class to make it easy
     to adjust the various time-vs-memory-security tradeoffs involved -
@@ -96,18 +96,21 @@ class NonceManager(object):
         raise NotImplementedError  # pragma: no cover
 
     def get_nonce_count(self, nonce):
-        """Get the current client nonce-count.
+        """Get the current maximum client nonce-count.
 
-        This method returns the most-recently-set client nonce-count, or
-        None if not nonce-count has been set.
+        This method returns the maximum seen value of the client nonce-count
+        for the given nonce.  If no nonce-count values have been seen then
+        None is returned.
         """
         raise NotImplementedError  # pragma: no cover
 
-    def set_nonce_count(self, nonce, nc):
-        """Set the current client nonce-count.
+    def record_nonce_count(self, nonce, nc):
+        """Record the given client nonce-count.
 
-        This method records the given value as the current nonce-count for
-        that nonce.  Subsequent calls to get_nonce_count() will return it.
+        This method records the given nonce-count value as seen for the
+        specified nonce.  Subsequent calls to get_nonce_count() will return
+        the maximum of all recorded nonce-counts.
+
         The given nonce-count value should be an integer.
         """
         raise NotImplementedError  # pragma: no cover
@@ -159,7 +162,7 @@ class SignedNonceManager(object):
         # We keep a queue of nonces and aggresively purge them when expired.
         # Unfortunately this requires a lock, but we go to some lengths
         # to avoid having to acquire it in the default case.  See the
-        # set_nonce_count() method for the details.
+        # record_nonce_count() method for the details.
         self._nonce_purge_lock = threading.Lock()
         self._nonce_purge_queue = []
 
@@ -214,14 +217,15 @@ class SignedNonceManager(object):
         # from the client and not produce any errors.
         return self._nonce_counts.get(nonce, None)
 
-    def set_nonce_count(self, nonce, nc):
-        """Set the current client nonce-count."""
+    def record_nonce_count(self, nonce, nc):
+        """Record the given client nonce-count."""
+        nc_old = self._nonce_counts.get(nonce, None)
         # If this is the first count registered for that nonce,
         # add it into the heap for expiry tracking.  Also take the
         # opportunity to remove a few expired nonces from memory.
         # In this way, we only spend time purging if we're about to
         # increase memory usage by registering a new nonce.
-        if nonce not in self._nonce_counts:
+        if nc_old is None:
             with self._nonce_purge_lock:
                 self._purge_expired_nonces(limit=10)
                 heapq.heappush(self._nonce_purge_queue, nonce)
@@ -230,7 +234,8 @@ class SignedNonceManager(object):
         # is sending parallel requests with the same nonce.  That's
         # not very likely and not very serious, and it's outweighed
         # by not having to take the lock in the common case.
-        self._nonce_counts[nonce] = nc
+        if nc_old is None or nc_old < nc:
+            self._nonce_counts[nonce] = nc
 
     def _purge_expired_nonces(self, limit=None):
         """Purge any expired nonces from the in-memory store."""

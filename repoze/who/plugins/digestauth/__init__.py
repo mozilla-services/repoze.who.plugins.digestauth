@@ -11,14 +11,14 @@
 # for the specific language governing rights and limitations under the
 # License.
 #
-# The Original Code is Cornice (Sagrada)
+# The Original Code is repoze.who.plugins.digestauth
 #
 # The Initial Developer of the Original Code is the Mozilla Foundation.
 # Portions created by the Initial Developer are Copyright (C) 2011
 # the Initial Developer. All Rights Reserved.
 #
 # Contributor(s):
-#   Ryan Kelly (ryan@rfk.id.au)
+#   Ryan Kelly (rkelly@mozilla.com)
 #
 # Alternatively, the contents of this file may be used under the terms of
 # either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -47,10 +47,7 @@ from repoze.who.interfaces import IIdentifier, IChallenger, IAuthenticator
 from repoze.who.utils import resolveDotted
 
 from repoze.who.plugins.digestauth.noncemanager import SignedNonceManager
-from repoze.who.plugins.digestauth.utils import (parse_auth_header,
-                                                 validate_digest_parameters,
-                                                 validate_digest_uri,
-                                                 validate_digest_nonce,
+from repoze.who.plugins.digestauth.utils import (extract_digest_credentials,
                                                  calculate_pwdhash,
                                                  check_digest_response)
 
@@ -63,7 +60,7 @@ class DigestAuthPlugin(object):
     """A repoze.who plugin for authentication via HTTP-Digest-Auth.
 
     This plugin provides a repoze.who IIdentifier/IAuthenticator/IChallenger
-    implementing the HTTP-Digest-Auth protocol:
+    implementing HTTP's Digest Access Authentication protocol:
 
         http://tools.ietf.org/html/rfc2617
 
@@ -125,54 +122,68 @@ class DigestAuthPlugin(object):
         If the nonce is found to be invalid (e.g. it is being re-used)
         then None is returned.
 
-        If the credentials are fresh then the returned identity is a
-        dictionary containing all the digest-auth parameters, e.g.:
+        If the credentials are fresh then the returned identity is a dict
+        containing all the digest-auth credentials necessary to validate the
+        signature, e.g.:
 
-            {'username': 'user', 'nonce': 'fc19cc22d1b5f84d', 'realm': 'Sync',
-             'algorithm': 'MD5', 'qop': 'auth', 'cnonce': 'd61391b0baeb5131',
-             'nc': '00000001', 'uri': '/some-protected-uri',
+            {'username': 'user',
+             'nonce': 'fc19cc22d1b5f84d',
+             'realm': 'Sync',
+             'algorithm': 'MD5',
+             'qop': 'auth',
+             'cnonce': 'd61391b0baeb5131',
+             'nc': '00000001',
+             'uri': '/some-protected-uri',
+             'request-method': 'GET',
              'response': '75a8f0d4627eef8c73c3ac64a4b2acca'}
 
         It is the responsibility of an IAuthenticator plugin to check that
         the "response" value is a correct digest calculated according to the
-        provided parameters.
+        provided credentials.
         """
-        # Grab the auth credentials, if any.
-        authz = environ.get("HTTP_AUTHORIZATION")
-        if authz is None:
+        # Grab the credentials out of the environment.
+        identity = extract_digest_credentials(environ)
+        if identity is None:
             return None
-        # Parse and sanity-check the auth credentials.
-        try:
-            params = parse_auth_header(authz)
-        except ValueError:
-            return None
-        if params["scheme"].lower() != "digest":
-            return None
-        if not validate_digest_parameters(params):
-            return None
-        # Check that the digest is applied to the correct request URI.
-        if not validate_digest_uri(environ, params):
+        # Check that they're for the expected realm.
+        if identity["realm"] != self.realm:
             return None
         # Check that the provided nonce is valid.
         # If this looks like a stale request, mark it in the environment
         # so we can include that information in the challenge.
-        if not validate_digest_nonce(environ, params, self.nonce_manager):
+        nonce = identity["nonce"]
+        if not self.nonce_manager.is_valid_nonce(nonce, environ):
             environ[_ENVKEY_STALE_NONCE] = True
             return None
+        # Check that the nonce-count is strictly increasing.
+        # We store them as integers since that takes less memory than strings.
+        nc_old = self.nonce_manager.get_nonce_count(nonce)
+        if nc_old is not None:
+            nc_new = identity.get("nc", None)
+            if nc_new is None or int(nc_new, 16) <= nc_old:
+                environ[_ENVKEY_STALE_NONCE] = True
+                return None
         # Looks good!
-        return params
+        return identity
 
     def remember(self, environ, identity):
         """Remember the authenticated identity.
 
+        This method records an updated nonce-count for the given identity.
+        By only updating the nonce-count if the request is successfully
+        authenticated, we reduce the risk of a DOS via memory exhaustion.
+
         This method can be used to pre-emptively send an updated nonce to
-        the client as part of a successful response.  It is otherwise a
-        no-op; the user-agent is supposed to remember the provided credentials
-        and automatically send an authorization header with future requests.
+        the client as part of a successful response.
         """
         nonce = identity.get("nonce", None)
         if nonce is None:
             return None
+        # Update the nonce-count if given.
+        nc_new = identity.get("nc", None)
+        if nc_new is not None:
+            self.nonce_manager.record_nonce_count(nonce, int(nc_new, 16))
+        # Send an updated nonce if required.
         next_nonce = self.nonce_manager.get_next_nonce(nonce, environ)
         if next_nonce is None:
             return None
@@ -189,10 +200,13 @@ class DigestAuthPlugin(object):
         return self._get_challenge_headers(environ, check_stale=False)
 
     def authenticate(self, environ, identity):
-        """Authenticated the provided identity.
+        """Authenticate the provided identity.
 
         If one of the "get_password" or "get_pwdhash" callbacks were provided
         then this class is capable of authenticating the identity for itself.
+        It will calculate the expected digest response and compare it to that
+        provided by the client.  The client is authenticated only if it has
+        provided the correct response.
         """
         # Grab the username.
         # If there isn't one, we can't use this identity.
@@ -213,7 +227,7 @@ class DigestAuthPlugin(object):
         else:
             return None
         # Validate the digest response.
-        if not check_digest_response(environ, identity, pwdhash=pwdhash):
+        if not check_digest_response(identity, pwdhash=pwdhash):
             return None
         # Looks good!
         return username
