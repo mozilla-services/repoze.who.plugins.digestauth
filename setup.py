@@ -13,15 +13,15 @@ with open(os.path.join(here, 'CHANGES.txt')) as f:
 requires = ['repoze.who', 'unittest2']
 
 setup(name='repoze.who.plugins.digestauth',
-      version='0.1',
+      version='0.1.0',
       description='repoze.who.plugins.digestauth',
       long_description=README + '\n\n' + CHANGES,
       classifiers=[
         "Programming Language :: Python",
         ],
-      author='',
-      author_email='',
-      url='',
+      author='Mozilla Services',
+      author_email='services-dev@mozilla.org',
+      url='https://github.com/mozilla-services/repoze.who.plugins.digestauth',
       keywords='authentication repoze http digest',
       packages=find_packages(),
       include_package_data=True,

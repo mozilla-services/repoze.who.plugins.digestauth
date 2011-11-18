@@ -50,7 +50,6 @@ from repoze.who.plugins.digestauth.noncemanager import SignedNonceManager
 from repoze.who.plugins.digestauth.utils import (parse_auth_header,
                                                  calculate_digest_response,
                                                  calculate_pwdhash,
-                                                 extract_digest_credentials,
                                                  validate_digest_parameters,
                                                  validate_digest_uri)
 
@@ -254,7 +253,7 @@ class TestDigestAuthPlugin(unittest.TestCase):
         authz = ",".join('%s="%s"' % v for v in params.iteritems())
         environ = make_environ(REQUEST_METHOD="GET",
                                PATH_INFO="/dir/index.html",
-                               HTTP_AUTHORIZATION="Digest "+authz)
+                               HTTP_AUTHORIZATION="Digest " + authz)
         identity = plugin.identify(environ)
         self.assertEquals(identity["username"], "Mufasa")
 
