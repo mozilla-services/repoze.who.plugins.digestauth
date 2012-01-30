@@ -13,7 +13,7 @@ with open(os.path.join(here, 'CHANGES.txt')) as f:
 requires = ['repoze.who', 'unittest2']
 
 setup(name='repoze.who.plugins.digestauth',
-      version='0.1.0',
+      version='0.1.1',
       description='repoze.who.plugins.digestauth',
       long_description=README + '\n\n' + CHANGES,
       classifiers=[
